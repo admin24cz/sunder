@@ -66,9 +66,10 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Tests may assert, use hardcoded fake secrets, and skip per-function docstrings
-# — a well-named test is its own description.
-"tests/**" = ["S101", "S105", "S106", "D100", "D103", "D104"]
+# Tests may assert, use hardcoded fake secrets, and skip docstrings — a
+# well-named test is its own description, and a fake's methods are documented by
+# the protocol they stand in for.
+"tests/**" = ["S101", "S105", "S106", "D100", "D101", "D102", "D103", "D104", "D107"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

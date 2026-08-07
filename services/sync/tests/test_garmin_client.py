@@ -1,0 +1,297 @@
+"""Tests for the Garmin client (spec 7.1, 7.2, 11.2).
+
+Garmin is never contacted. The client talks to a fake through the `GarminApi`
+protocol, which is what makes the retry, pacing and error-classification paths
+testable at all — and what spec 11.2 requires.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Sequence
+from typing import Any
+
+import pytest
+
+from sunder_sync.crypto import Secret
+from sunder_sync.domain import ConnectionStatus
+from sunder_sync.garmin import (
+    GarminAuthError,
+    GarminClient,
+    GarminRateLimitedError,
+    GarminResponseError,
+    GarminUnavailableError,
+    RateLimiter,
+    RetryPolicy,
+    classify_exception,
+)
+from tests.test_throttle import FakeClock
+
+EMAIL = "runner@example.com"
+PASSWORD = "garmin-password"
+
+
+class FakeGarminApi:
+    """Stand-in for `garminconnect.Garmin`."""
+
+    def __init__(
+        self,
+        *,
+        login_error: Exception | None = None,
+        activities_error: Exception | None = None,
+        activities: Sequence[dict[str, Any]] | None = None,
+    ) -> None:
+        self.login_error = login_error
+        self.activities_error = activities_error
+        self.activities = activities if activities is not None else []
+        self.login_calls = 0
+        self.list_calls: list[tuple[int, int]] = []
+
+    def login(self) -> object:
+        self.login_calls += 1
+        if self.login_error is not None:
+            raise self.login_error
+        return object()
+
+    def get_activities(self, start: int, limit: int) -> Sequence[dict[str, Any]]:
+        self.list_calls.append((start, limit))
+        if self.activities_error is not None:
+            raise self.activities_error
+        return self.activities
+
+    def get_activity_details(self, activity_id: int) -> dict[str, Any]:
+        return {"activityId": activity_id}
+
+
+class FakeHttpError(Exception):
+    """An exception carrying an HTTP status, like the real library's."""
+
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.status_code = status_code
+
+
+def build_client(
+    api: FakeGarminApi, clock: FakeClock | None = None
+) -> tuple[GarminClient, FakeClock, list[tuple[str, str]]]:
+    """Build a client wired to `api`, with a fake clock and a factory spy."""
+    clock = clock if clock is not None else FakeClock()
+    factory_calls: list[tuple[str, str]] = []
+
+    def factory(email: str, password: str) -> FakeGarminApi:
+        factory_calls.append((email, password))
+        return api
+
+    client = GarminClient(
+        api_factory=factory,
+        rate_limiter=RateLimiter(
+            min_interval_seconds=1.5, sleep=clock.sleep, monotonic=clock.monotonic
+        ),
+        retry_policy=RetryPolicy(sleep=clock.sleep, jitter=lambda: 0.0),
+    )
+    return client, clock, factory_calls
+
+
+# ---------------------------------------------------------------------------
+# Error classification
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("status", "expected", "expected_state"),
+    [
+        (429, GarminRateLimitedError, ConnectionStatus.RATE_LIMITED),
+        (401, GarminAuthError, ConnectionStatus.AUTH_FAILED),
+        (403, GarminAuthError, ConnectionStatus.AUTH_FAILED),
+        (500, GarminUnavailableError, ConnectionStatus.ACTIVE),
+        (503, GarminUnavailableError, ConnectionStatus.ACTIVE),
+        (418, GarminResponseError, ConnectionStatus.ACTIVE),
+    ],
+)
+def test_http_status_determines_the_outcome(
+    status: int, expected: type[Exception], expected_state: ConnectionStatus
+) -> None:
+    error = classify_exception(FakeHttpError(status))
+    assert isinstance(error, expected)
+    assert error.connection_status is expected_state
+
+
+def test_status_is_found_through_a_wrapped_response() -> None:
+    """The real chain nests the response one or two levels down."""
+
+    class Response:
+        status_code = 429
+
+    class WrappedError(Exception):
+        response = Response()
+
+    assert isinstance(classify_exception(WrappedError()), GarminRateLimitedError)
+
+
+def test_status_is_found_through_a_chained_cause() -> None:
+    inner = FakeHttpError(429)
+    outer = Exception("wrapped")
+    outer.__cause__ = inner
+    assert isinstance(classify_exception(outer), GarminRateLimitedError)
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("GarminConnectTooManyRequestsError", GarminRateLimitedError),
+        ("GarminConnectAuthenticationError", GarminAuthError),
+        ("GarminConnectConnectionError", GarminUnavailableError),
+        ("SomethingEntirelyNew", GarminResponseError),
+    ],
+)
+def test_exception_type_name_classifies_when_no_status_is_available(
+    name: str, expected: type[Exception]
+) -> None:
+    """Matched by name so a library reorganising its exceptions still works."""
+    error = classify_exception(type(name, (Exception,), {})())
+    assert isinstance(error, expected)
+
+
+@pytest.mark.parametrize("exc", [TimeoutError(), ConnectionError()])
+def test_builtin_network_errors_are_transient(exc: Exception) -> None:
+    assert isinstance(classify_exception(exc), GarminUnavailableError)
+
+
+def test_a_rate_limit_wins_over_the_type_name() -> None:
+    """A 429 delivered as a connection error must still stop the run."""
+    exc = type("GarminConnectConnectionError", (Exception,), {})()
+    exc.status_code = 429
+    assert isinstance(classify_exception(exc), GarminRateLimitedError)
+
+
+# ---------------------------------------------------------------------------
+# Login
+# ---------------------------------------------------------------------------
+
+
+def test_login_passes_the_revealed_password_to_the_factory_only() -> None:
+    api = FakeGarminApi()
+    client, _, factory_calls = build_client(api)
+
+    client.login(EMAIL, Secret(PASSWORD))
+
+    assert factory_calls == [(EMAIL, PASSWORD)]
+    assert api.login_calls == 1
+    assert client.is_authenticated
+
+
+def test_login_never_writes_the_password_to_the_log(caplog: pytest.LogCaptureFixture) -> None:
+    """Spec 6.4, on the one path where the plaintext genuinely exists."""
+    api = FakeGarminApi()
+    client, _, _ = build_client(api)
+
+    with caplog.at_level(logging.DEBUG):
+        client.login(EMAIL, Secret(PASSWORD))
+
+    assert PASSWORD not in caplog.text
+    assert EMAIL in caplog.text
+
+
+def test_failed_login_never_leaks_the_password_into_the_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The failure path is where a password most plausibly escapes."""
+    api = FakeGarminApi(login_error=FakeHttpError(401))
+    client, _, _ = build_client(api)
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(GarminAuthError) as excinfo:
+        client.login(EMAIL, Secret(PASSWORD))
+
+    assert PASSWORD not in str(excinfo.value)
+    assert PASSWORD not in caplog.text
+    # The traceback must not carry a frame holding the plaintext either.
+    assert excinfo.value.__cause__ is None
+
+
+def test_rejected_credentials_are_not_retried() -> None:
+    api = FakeGarminApi(login_error=FakeHttpError(401))
+    client, clock, _ = build_client(api)
+
+    with pytest.raises(GarminAuthError) as excinfo:
+        client.login(EMAIL, Secret(PASSWORD))
+
+    assert api.login_calls == 1
+    assert clock.slept == [], "a rejected password must not be retried"
+    assert excinfo.value.connection_status is ConnectionStatus.AUTH_FAILED
+
+
+def test_rate_limited_login_stops_immediately() -> None:
+    api = FakeGarminApi(login_error=FakeHttpError(429))
+    client, clock, _ = build_client(api)
+
+    with pytest.raises(GarminRateLimitedError) as excinfo:
+        client.login(EMAIL, Secret(PASSWORD))
+
+    assert api.login_calls == 1
+    assert clock.slept == []
+    assert excinfo.value.connection_status is ConnectionStatus.RATE_LIMITED
+
+
+def test_transient_login_failure_is_retried_with_backoff() -> None:
+    api = FakeGarminApi(login_error=FakeHttpError(503))
+    client, clock, _ = build_client(api)
+
+    with pytest.raises(GarminUnavailableError):
+        client.login(EMAIL, Secret(PASSWORD))
+
+    assert api.login_calls == 3
+    assert clock.slept == [pytest.approx(2.0), pytest.approx(4.0)]
+
+
+# ---------------------------------------------------------------------------
+# Requests
+# ---------------------------------------------------------------------------
+
+
+def test_requests_before_login_are_a_programming_error() -> None:
+    """Not a GarminError: this is a bug in the runner, not the user's problem.
+
+    Recording it against their connection status would blame the wrong thing.
+    """
+    api = FakeGarminApi()
+    client, _, _ = build_client(api)
+
+    with pytest.raises(RuntimeError, match="login"):
+        client.list_activities()
+
+
+def test_activities_are_returned_unparsed() -> None:
+    """Parsing belongs to sunder_sync.parsers, so a schema change surfaces there."""
+    payload = [{"activityId": 1}, {"activityId": 2}]
+    api = FakeGarminApi(activities=payload)
+    client, _, _ = build_client(api)
+    client.login(EMAIL, Secret(PASSWORD))
+
+    assert client.list_activities(start=0, limit=20) == payload
+    assert api.list_calls == [(0, 20)]
+
+
+def test_every_request_is_paced() -> None:
+    """Spec 7.2: a minimum gap between calls, login included."""
+    api = FakeGarminApi(activities=[])
+    client, clock, _ = build_client(api)
+
+    client.login(EMAIL, Secret(PASSWORD))
+    client.list_activities()
+    client.list_activities(start=20)
+
+    assert clock.slept == [pytest.approx(1.5), pytest.approx(1.5)]
+
+
+def test_rate_limited_listing_stops_immediately() -> None:
+    api = FakeGarminApi(activities_error=FakeHttpError(429))
+    client, clock, _ = build_client(api)
+    client.login(EMAIL, Secret(PASSWORD))
+    clock.slept.clear()
+
+    with pytest.raises(GarminRateLimitedError):
+        client.list_activities()
+
+    assert len(api.list_calls) == 1
+    # The pacing wait still happened; no *backoff* sleep was added.
+    assert clock.slept == [pytest.approx(1.5)]
