@@ -1,0 +1,41 @@
+@import 'tailwindcss';
+
+/*
+ * Spec section 10: contrast per WCAG AA, and the app is primarily used on a
+ * phone right after training — often outdoors. Both themes are defined so the
+ * device setting is respected rather than forcing a bright screen at dawn.
+ */
+@theme {
+  --color-brand-50: oklch(0.97 0.02 250);
+  --color-brand-500: oklch(0.62 0.16 250);
+  --color-brand-600: oklch(0.54 0.16 250);
+  --color-brand-700: oklch(0.46 0.14 250);
+}
+
+@layer base {
+  html {
+    /* Respect a reduced-motion preference before any animation is added. */
+    scroll-behavior: smooth;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html {
+      scroll-behavior: auto;
+    }
+  }
+
+  body {
+    @apply bg-white text-slate-900 antialiased;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    body {
+      @apply bg-slate-950 text-slate-100;
+    }
+  }
+
+  /* Keyboard navigation must stay visible (spec section 10). */
+  :focus-visible {
+    @apply outline-brand-600 outline-2 outline-offset-2;
+  }
+}
