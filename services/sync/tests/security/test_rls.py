@@ -48,6 +48,38 @@ def _rows(response: httpx.Response) -> list[Any]:
 
 
 # ---------------------------------------------------------------------------
+# Harness sanity
+# ---------------------------------------------------------------------------
+# Every denial assertion below is of the form "no rows came back". A request
+# rejected by the API gateway before RLS is consulted looks identical. These two
+# tests prove the clients are wired correctly, so the suite cannot pass by
+# failing to reach the database at all.
+
+
+def test_anonymous_client_actually_reaches_the_api(anon_client: httpx.Client) -> None:
+    """A blanket 401 here would make every anon denial test vacuous."""
+    response = anon_client.get("/rest/v1/")
+    assert response.status_code != 401, (
+        "anon client was rejected by the gateway; its headers are wrong, so the "
+        "anonymous-access tests below would pass without testing anything"
+    )
+
+
+def test_authenticated_client_actually_reaches_the_api(
+    users: tuple[Account, Account], as_user: AsUser
+) -> None:
+    """Reads its own profile, which the policy allows — so a hit is expected."""
+    alice, _ = users
+    with as_user(alice) as client:
+        response = client.get("/rest/v1/profiles", params={"select": "id"})
+    assert response.status_code == 200, (
+        f"authenticated client could not read its own profile ({response.status_code}); "
+        f"the isolation tests below would pass without testing anything"
+    )
+    assert response.json() == [{"id": alice.id}]
+
+
+# ---------------------------------------------------------------------------
 # Cross-user isolation
 # ---------------------------------------------------------------------------
 

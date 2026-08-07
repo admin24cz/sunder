@@ -111,7 +111,11 @@ def _create_user(client: httpx.Client, supabase_env: SupabaseEnv) -> Account:
         "/auth/v1/token",
         params={"grant_type": "password"},
         json={"email": email, "password": password},
-        headers={"apikey": supabase_env.anon_key, "Authorization": ""},
+        headers={
+            "apikey": supabase_env.anon_key,
+            # Overrides the service-role bearer this client normally carries.
+            "Authorization": f"Bearer {supabase_env.anon_key}",
+        },
     )
     signed_in.raise_for_status()
     return Account(id=user_id, email=email, access_token=signed_in.json()["access_token"])
@@ -162,12 +166,20 @@ def as_user(supabase_env: SupabaseEnv) -> AsUser:
 
 @pytest.fixture
 def anon_client(supabase_env: SupabaseEnv) -> Iterator[httpx.Client]:
-    """Client with the anon key and no session — a logged-out visitor."""
+    """Client with the anon key and no session — a logged-out visitor.
+
+    The anon key goes in *both* headers, which is what supabase-js sends when
+    nobody is signed in. Sending only `apikey` makes the gateway reject the
+    request with a 401 before RLS is ever consulted — and since a denied read
+    and a rejected request look the same to a test asserting "no rows came
+    back", that would let these tests pass without proving anything.
+    """
     with httpx.Client(
         base_url=supabase_env.url,
         timeout=REQUEST_TIMEOUT_SECONDS,
         headers={
             "apikey": supabase_env.anon_key,
+            "Authorization": f"Bearer {supabase_env.anon_key}",
             "Content-Type": "application/json",
         },
     ) as client:
