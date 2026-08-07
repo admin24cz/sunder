@@ -1,0 +1,64 @@
+# Pre-commit hooks — the last line of defence before a secret or unformatted
+# file reaches the repository (spec section 6.4).
+#
+# Install once per clone:  pre-commit install
+minimum_pre_commit_version: "3.5.0"
+
+repos:
+  # --- Secret detection ----------------------------------------------------
+  # Runs first: a leaked key is the only failure here that a follow-up commit
+  # cannot undo, so it has to block before anything else does.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # --- Generic hygiene -----------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=512"]
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      # Catches a private key staged by accident.
+      - id: detect-private-key
+
+  # --- Python (services/sync) ---------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+        files: ^services/sync/
+      - id: ruff-format
+        files: ^services/sync/
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (services/sync)
+        entry: bash -c 'cd services/sync && python -m mypy src tests'
+        language: system
+        types: [python]
+        files: ^services/sync/
+        pass_filenames: false
+
+      # --- Frontend (apps/web) ---------------------------------------------
+      - id: prettier
+        name: prettier (apps/web)
+        entry: bash -c 'cd apps/web && npx --no-install prettier --write --ignore-unknown "$@"' --
+        language: system
+        files: ^apps/web/.*\.(ts|tsx|js|jsx|json|css|md|html)$
+
+      - id: eslint
+        name: eslint (apps/web)
+        entry: bash -c 'cd apps/web && npx --no-install eslint --max-warnings=0 --fix "$@"' --
+        language: system
+        files: ^apps/web/src/.*\.(ts|tsx)$
