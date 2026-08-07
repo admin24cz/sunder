@@ -1,0 +1,80 @@
+name: Deploy frontend
+
+# Deploys the SPA to GitHub Pages (spec section 2.2). Only from main, and only
+# after CI has gone green on it — `workflow_run` rather than `push` so a broken
+# main cannot reach the live site.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  # Manual trigger for a re-deploy without a new commit.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time. `cancel-in-progress: false` because cancelling a
+# half-finished Pages deployment can leave the site serving mixed assets.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    # Skips when the triggering CI run failed; workflow_run fires either way.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          # Public by design — RLS is what protects the data (spec 6.3).
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          # A project site is served from /<repo>/, so every asset URL needs
+          # that prefix or the page loads blank.
+          VITE_BASE_PATH: /${{ github.event.repository.name }}/
+        run: npm run build
+
+      # GitHub Pages has no rewrite rules, so a deep link like /activities/123
+      # is a 404 before React Router ever runs. Serving index.html as the 404
+      # page is the standard workaround: Pages returns it, the SPA boots and the
+      # router resolves the path client-side.
+      - name: Add SPA fallback
+        run: cp dist/index.html dist/404.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/web/dist
+
+  deploy:
+    name: Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

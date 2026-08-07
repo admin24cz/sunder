@@ -1,0 +1,159 @@
+name: CI
+
+# Spec section 11.4: lint, typecheck and tests run on every PR, and merging to
+# main is gated on this being green (branch protection, spec 15 step 11).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A new push supersedes the run already in flight for the same ref. Public
+# repositories get generous Actions minutes, but a queue of stale runs still
+# delays the one whose result anybody is waiting for.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Frontend
+  # ---------------------------------------------------------------------------
+  web:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      # `ci` rather than `install`: it installs exactly the lockfile and fails
+      # if package.json and the lockfile disagree, which is the difference
+      # between a reproducible build and a coincidence.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Typecheck
+        run: npx tsc -b --force
+
+      - name: Unit tests
+        run: npm run test
+
+      - name: Build
+        env:
+          # Real values are not needed to prove the build compiles, and using
+          # placeholders keeps the production anon key out of PR runs, where a
+          # fork's workflow could otherwise read it.
+          VITE_SUPABASE_URL: https://ci.invalid
+          VITE_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+        run: npm run build
+
+      # Handed to the security job, which asserts no secret is present in it.
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # Sync service
+  # ---------------------------------------------------------------------------
+  sync:
+    name: Sync service
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/sync
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Typecheck
+        run: uv run mypy
+
+      # The RLS tests skip without a live Supabase; everything else runs here.
+      - name: Tests
+        run: uv run pytest
+
+  # ---------------------------------------------------------------------------
+  # Security gate (spec 11.3)
+  # ---------------------------------------------------------------------------
+  # Split into its own job so that "did the security check pass" is a single,
+  # visible answer in the checks list rather than a step buried in a build log.
+  security:
+    name: Security
+    runs-on: ubuntu-latest
+    needs: [web]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Download frontend build
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist
+
+      - name: Install dependencies
+        working-directory: services/sync
+        run: uv sync --all-extras
+
+      # Verifies encryption at rest and that no secret name or value reached the
+      # bundle. The cross-user RLS tests need a live database and skip here;
+      # they are run against a Supabase instance before first deploy.
+      - name: Security tests
+        working-directory: services/sync
+        run: uv run pytest tests/security -v
+
+  # ---------------------------------------------------------------------------
+  # Secret scanning
+  # ---------------------------------------------------------------------------
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # gitleaks needs history to scan the commits a PR introduces, not just
+          # the resulting tree — a key added and then removed is still leaked.
+          fetch-depth: 0
+
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

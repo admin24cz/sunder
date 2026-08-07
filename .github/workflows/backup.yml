@@ -1,0 +1,111 @@
+name: Backup database
+
+# Spec section 8.3: the Supabase free tier has no automatic backups at all, and
+# that is the single largest operational risk in the project. This workflow is
+# the entire disaster-recovery story, so it is deliberately simple — a plain
+# pg_dump, encrypted, kept as an artifact.
+on:
+  schedule:
+    # 02:15 UTC daily. Off the hour because scheduled runs cluster at :00 and
+    # GitHub delays them under load.
+    - cron: '15 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # Needed only by the failure step, which opens an issue when a backup breaks.
+  issues: write
+
+jobs:
+  backup:
+    name: Dump and encrypt
+    runs-on: ubuntu-latest
+
+    steps:
+      # pg_dump refuses to dump a server newer than itself, and the runner image
+      # ships a client that lags behind what Supabase runs. Installing from the
+      # PostgreSQL apt repository keeps this working across Supabase upgrades.
+      - name: Install PostgreSQL client
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client-17
+
+      - name: Dump database
+        env:
+          # Full Postgres connection string, not the REST URL. Supabase shows it
+          # under Project Settings -> Database -> Connection string (URI). Use
+          # the pooler-free direct connection: pg_dump needs a session, and the
+          # transaction pooler does not provide one.
+          PGCONNECTION: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$PGCONNECTION" ]; then
+            echo "::error::SUPABASE_DB_URL is not set — see docs/setup.md"
+            exit 1
+          fi
+          # The connection string embeds the database password, so mask it
+          # before anything can echo it into the log (spec 6.4).
+          echo "::add-mask::$PGCONNECTION"
+
+          # --no-owner / --no-privileges: the dump is restored into a fresh
+          # Supabase project whose role names differ, and ownership statements
+          # referencing roles that do not exist would abort the restore.
+          pg_dump "$PGCONNECTION" \
+            --format=custom \
+            --no-owner \
+            --no-privileges \
+            --file=sunder.dump
+
+          echo "Dump size: $(du -h sunder.dump | cut -f1)"
+
+      # The artifact holds every user's training history and their encrypted
+      # Garmin credentials. Artifacts are not public, but they are readable by
+      # anyone with repository access, so the dump is encrypted independently.
+      - name: Encrypt dump
+        env:
+          BACKUP_ENCRYPTION_KEY: ${{ secrets.BACKUP_ENCRYPTION_KEY }}
+        run: |
+          if [ -z "$BACKUP_ENCRYPTION_KEY" ]; then
+            echo "::error::BACKUP_ENCRYPTION_KEY is not set — see docs/setup.md"
+            exit 1
+          fi
+          echo "::add-mask::$BACKUP_ENCRYPTION_KEY"
+
+          # High iteration count because the key is passed as a passphrase; it
+          # costs a second here and makes an offline attack on a leaked artifact
+          # meaningfully more expensive.
+          openssl enc -aes-256-cbc -pbkdf2 -iter 600000 -salt \
+            -in sunder.dump \
+            -out sunder.dump.enc \
+            -pass env:BACKUP_ENCRYPTION_KEY
+
+          # Remove the plaintext so it cannot be picked up by the upload step.
+          rm -f sunder.dump
+
+      - name: Upload encrypted backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: sunder-backup-${{ github.run_id }}
+          path: sunder.dump.enc
+          retention-days: 30
+          if-no-files-found: error
+
+      # A backup nobody notices failing is not a backup. Spec 7.5 uses the same
+      # mechanism for repeated sync failures.
+      - name: Report failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Záloha databáze selhala ($(date -u +%Y-%m-%d))" \
+            --body "Workflow \`backup.yml\` selhal: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Supabase free tier nemá vlastní zálohy — dokud tohle neběží, projekt nemá žádnou zálohu." \
+            --label backup,bug \
+          || echo "::warning::Could not create issue (label may not exist)"
