@@ -69,7 +69,20 @@ ignore = [
 # Tests may assert, use hardcoded fake secrets, and skip docstrings — a
 # well-named test is its own description, and a fake's methods are documented by
 # the protocol they stand in for.
-"tests/**" = ["S101", "S105", "S106", "D100", "D101", "D102", "D103", "D104", "D107"]
+"tests/**" = [
+  "S101",
+  "S105",
+  "S106",
+  "D100",
+  "D101",
+  "D102",
+  "D103",
+  "D104",
+  "D107",
+  # Payload builders take **overrides: Any because the payloads they mimic are
+  # heterogeneous JSON; narrowing it would only be a fiction.
+  "ANN401",
+]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
