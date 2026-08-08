@@ -56,12 +56,18 @@ def _rows(response: httpx.Response) -> list[Any]:
 # failing to reach the database at all.
 
 
-def test_anonymous_client_actually_reaches_the_api(anon_client: httpx.Client) -> None:
-    """A blanket 401 here would make every anon denial test vacuous."""
-    response = anon_client.get("/rest/v1/")
-    assert response.status_code != 401, (
-        "anon client was rejected by the gateway; its headers are wrong, so the "
-        "anonymous-access tests below would pass without testing anything"
+def test_the_anonymous_key_is_valid(anon_client: httpx.Client) -> None:
+    """The anon key works — so a denied table read is a denial, not a bad key.
+
+    Probed against an auth endpoint rather than a table on purpose. `anon` holds
+    no table grant at all by design, so every REST request it makes is refused
+    before RLS is consulted; asking a table here could not distinguish a working
+    key from a broken one. The auth settings endpoint needs only a valid key.
+    """
+    response = anon_client.get("/auth/v1/settings")
+    assert response.status_code == 200, (
+        f"the anon key was rejected ({response.status_code}); the anonymous-access "
+        f"tests below would pass without testing anything"
     )
 
 
