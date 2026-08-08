@@ -38,7 +38,22 @@ enable_signup = false
 enable_anonymous_sign_ins = false
 
 [auth.email]
-enable_signup = false
+# TRUE, and that is not a contradiction with `enable_signup = false` above.
+#
+# These two keys look like the same setting and are not:
+#
+#   [auth] enable_signup        -> whether anyone may register at all
+#   [auth.email] enable_signup  -> whether the email/password provider is on
+#
+# Setting this one to false does not "close email registration" — it disables
+# the provider outright, and existing users can no longer sign in either. That
+# was found the only way it could be: by setting it to false, pushing, and
+# having the owner's own login fail with `email_provider_disabled`.
+#
+# Registration stays closed by the global flag. This one keeps the door working
+# for the accounts that already exist.
+enable_signup = true
+
 # Confirming both the old and the new address on a change, so a stolen session
 # cannot quietly move an account to an attacker's mailbox.
 double_confirm_changes = true
