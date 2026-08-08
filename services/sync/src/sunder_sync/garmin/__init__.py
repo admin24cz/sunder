@@ -10,6 +10,7 @@ from sunder_sync.garmin.client import (
 from sunder_sync.garmin.errors import (
     GarminAuthError,
     GarminError,
+    GarminMfaRequiredError,
     GarminRateLimitedError,
     GarminResponseError,
     GarminUnavailableError,
@@ -32,6 +33,7 @@ __all__ = [
     "GarminAuthError",
     "GarminClient",
     "GarminError",
+    "GarminMfaRequiredError",
     "GarminRateLimitedError",
     "GarminResponseError",
     "GarminUnavailableError",

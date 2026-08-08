@@ -26,6 +26,7 @@ from sunder_sync.crypto import Secret
 from sunder_sync.garmin.errors import (
     GarminAuthError,
     GarminError,
+    GarminMfaRequiredError,
     GarminRateLimitedError,
     GarminResponseError,
     GarminUnavailableError,
@@ -89,6 +90,8 @@ def _status_code_of(exc: BaseException) -> int | None:
     return None
 
 
+_MFA_MARKERS = ("mfa", "multi-factor", "multi factor", "two-factor", "2fa")
+
 _RATE_LIMIT_MARKERS = (
     "429",
     "too many requests",
@@ -96,6 +99,24 @@ _RATE_LIMIT_MARKERS = (
     "rate-limit",
     "ratelimit",
 )
+
+
+def _chain_mentions(exc: BaseException, markers: tuple[str, ...]) -> bool:
+    """Whether this exception, or anything it wraps, mentions any marker.
+
+    Walks __cause__ and __context__, guarding against a cycle. Used for the two
+    cases where the library discards the information that matters and leaves it
+    only in a message or an inner exception's class name.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        haystack = f"{type(current).__name__} {current}".lower()
+        if any(marker in haystack for marker in markers):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _mentions_rate_limit(exc: BaseException) -> bool:
@@ -115,15 +136,7 @@ def _mentions_rate_limit(exc: BaseException) -> bool:
     `_status_code_of` is tried first. It earns its place because the
     alternative is silently getting this exact case wrong.
     """
-    seen: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        text = str(current).lower()
-        if any(marker in text for marker in _RATE_LIMIT_MARKERS):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
+    return _chain_mentions(exc, _RATE_LIMIT_MARKERS)
 
 
 def classify_exception(exc: BaseException) -> GarminError:
@@ -163,6 +176,15 @@ def classify_exception(exc: BaseException) -> GarminError:
     # `auth_failed` and stop retrying it forever.
     if _mentions_rate_limit(exc):
         return GarminRateLimitedError("Garmin rate limited the request")
+
+    # Before the auth branch: Garmin raises an authentication error for a
+    # second-factor prompt too, but the password was accepted and re-linking
+    # would fail identically. Reporting it as bad credentials sends the user to
+    # change a password that works.
+    if _chain_mentions(exc, _MFA_MARKERS):
+        return GarminMfaRequiredError(
+            "Garmin requires a second factor, which an unattended sync cannot provide"
+        )
 
     if "Authentication" in name or "Login" in name:
         return GarminAuthError("Garmin rejected the credentials")

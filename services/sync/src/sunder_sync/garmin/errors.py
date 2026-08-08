@@ -37,6 +37,25 @@ class GarminAuthError(GarminError):
     connection_status = ConnectionStatus.AUTH_FAILED
 
 
+class GarminMfaRequiredError(GarminError):
+    """Garmin accepted the password and then asked for a second factor.
+
+    Distinct from `GarminAuthError` because the remedy is completely different
+    and the wrong message is actively misleading. The stored password is
+    correct; re-linking the account will fail in exactly the same way. Telling
+    the user their credentials were rejected sends them to change a password
+    that was never the problem.
+
+    A headless sync has nowhere to obtain a one-time code, so this cannot be
+    retried and the connection is parked until the user resolves it — either by
+    switching that account to token-based access, or by turning the second
+    factor off (see docs/security.md).
+    """
+
+    retryable = False
+    connection_status = ConnectionStatus.AUTH_FAILED
+
+
 class GarminRateLimitedError(GarminError):
     """Garmin is throttling or has blocked us (HTTP 429, or a block page).
 

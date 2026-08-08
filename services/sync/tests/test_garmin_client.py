@@ -18,6 +18,7 @@ from sunder_sync.domain import ConnectionStatus
 from sunder_sync.garmin import (
     GarminAuthError,
     GarminClient,
+    GarminMfaRequiredError,
     GarminRateLimitedError,
     GarminResponseError,
     GarminUnavailableError,
@@ -347,3 +348,43 @@ def test_rate_limited_listing_stops_immediately() -> None:
     assert len(api.list_calls) == 1
     # The pacing wait still happened; no *backoff* sleep was added.
     assert clock.slept == [pytest.approx(1.5)]
+
+
+# ---------------------------------------------------------------------------
+# Second-factor prompts (found on the first real Garmin login)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # The exact text Garmin produced on the first real login attempt.
+        "MFA Required but no prompt_mfa mechanism supplied",
+        "Two-factor authentication required",
+        "2FA code needed",
+        "multi-factor challenge",
+    ],
+)
+def test_a_second_factor_prompt_is_not_reported_as_bad_credentials(message: str) -> None:
+    """The password was accepted; a code was demanded.
+
+    Reporting this as rejected credentials sends the user to change a password
+    that works, and re-linking the account fails in exactly the same way.
+    """
+    exc = type("GarminConnectAuthenticationError", (Exception,), {})(message)
+    error = classify_exception(exc)
+    assert isinstance(error, GarminMfaRequiredError)
+    assert not error.retryable
+
+
+def test_a_second_factor_prompt_is_found_through_an_inner_exception_class() -> None:
+    """Garminconnect signals it with an inner `_MFARequired` carrying no message."""
+    inner = type("_MFARequired", (Exception,), {})("")
+    outer = type("GarminConnectAuthenticationError", (Exception,), {})("login failed")
+    outer.__cause__ = inner
+    assert isinstance(classify_exception(outer), GarminMfaRequiredError)
+
+
+def test_a_plain_auth_failure_is_still_not_an_mfa_prompt() -> None:
+    exc = type("GarminConnectAuthenticationError", (Exception,), {})("Invalid credentials")
+    assert isinstance(classify_exception(exc), GarminAuthError)
