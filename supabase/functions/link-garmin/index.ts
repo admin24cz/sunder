@@ -31,8 +31,24 @@ const AAD_PREFIX = 'sunder:garmin-password:sealed:v1:';
 
 const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': Deno.env.get('ALLOWED_ORIGIN') ?? '*',
-  'Access-Control-Allow-Headers': 'authorization, content-type',
+  // Every header supabase-js actually sends, not just the obvious two.
+  //
+  // `apikey` is the one that matters and the one that was missing: the client
+  // sends it on every request, so the browser's preflight asks for it, and a
+  // response that omits it makes the browser refuse to send the real request at
+  // all. The failure looks like the function rejecting the call, but the call
+  // never arrives — which is why invoking it directly from a script succeeded
+  // while the form kept failing. Only browsers enforce CORS.
+  //
+  // `x-client-info` and `x-supabase-api-version` are sent by supabase-js too,
+  // and omitting either would fail the same way the moment it starts sending
+  // them.
+  'Access-Control-Allow-Headers':
+    'authorization, content-type, apikey, x-client-info, x-supabase-api-version',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  // Lets the browser reuse the preflight result instead of repeating it before
+  // every attempt.
+  'Access-Control-Max-Age': '86400',
 };
 
 interface LinkRequest {

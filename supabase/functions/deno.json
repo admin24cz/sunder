@@ -1,0 +1,21 @@
+{
+  "//": [
+    "Edge Functions run on Deno, not Node or the browser. Without this file an",
+    "editor applies the repository's TypeScript service to them and reports",
+    "`Cannot find name 'Deno'` on every function — noise that trains people to",
+    "ignore real errors. The Deno language server picks this up instead.",
+    "",
+    "The frontend's tsconfig already excludes this directory, so nothing here",
+    "affects the apps/web build."
+  ],
+  "compilerOptions": {
+    "lib": ["deno.window", "dom", "esnext"],
+    "strict": true
+  },
+  "imports": {
+    "@supabase/supabase-js": "jsr:@supabase/supabase-js@2",
+    "@noble/curves/": "npm:/@noble/curves@1.7.0/",
+    "@noble/hashes/": "npm:/@noble/hashes@1.6.1/",
+    "@noble/ciphers/": "npm:/@noble/ciphers@1.1.3/"
+  }
+}
