@@ -53,11 +53,16 @@ cd services/sync && uv sync --all-extras && cd ../..
 
 | Value | Where it goes | Secret? |
 |---|---|---|
-| Direct connection URI | `SUPABASE_DB_URL` | **yes** — contains the database password |
+| **Session pooler** URI | `SUPABASE_DB_URL` | **yes** — contains the database password |
 
-> `SUPABASE_DB_URL` is used only by `backup.yml`. `pg_dump` needs a real
-> Postgres session, so use the **direct** connection string, not the transaction
-> pooler one.
+> `SUPABASE_DB_URL` is used only by `backup.yml`, and it must be the **session
+> pooler** string — port 5432, host `aws-N-<region>.pooler.supabase.com`.
+>
+> Not the direct `db.<ref>.supabase.co` connection: that host resolves to IPv6
+> only, and GitHub-hosted runners have no IPv6, so the backup fails with
+> `Network is unreachable`. Not the transaction pooler on 6543 either, because
+> `pg_dump` needs a real session. The session pooler is the one that is both
+> IPv4-reachable and session-capable.
 
 Generate the encryption keys yourself:
 
@@ -232,6 +237,9 @@ secrets. Check they are set at repository level, not environment level.
 
 **`pg_dump: server version mismatch`.** Supabase upgraded past the client in
 `backup.yml`; bump `postgresql-client-17` to the newer major.
+
+**Backup fails with `Network is unreachable`.** `SUPABASE_DB_URL` is the direct
+connection, which is IPv6-only. Use the session pooler string instead.
 
 **Sync says `auth_failed`.** The stored Garmin password no longer works —
 usually because it was changed. Re-link the account through the UI.

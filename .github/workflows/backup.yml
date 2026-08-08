@@ -38,10 +38,19 @@ jobs:
 
       - name: Dump database
         env:
-          # Full Postgres connection string, not the REST URL. Supabase shows it
-          # under Project Settings -> Database -> Connection string (URI). Use
-          # the pooler-free direct connection: pg_dump needs a session, and the
-          # transaction pooler does not provide one.
+          # Full Postgres connection string, not the REST URL — and specifically
+          # the SESSION POOLER one, on port 5432:
+          #
+          #   postgresql://postgres.<ref>:<pw>@aws-N-<region>.pooler.supabase.com:5432/postgres
+          #
+          # Not the direct `db.<ref>.supabase.co` connection, which this
+          # workflow originally used and which fails here with "Network is
+          # unreachable". That host has no A record at all — it resolves to IPv6
+          # only, and GitHub-hosted runners have no IPv6.
+          #
+          # Not the transaction pooler on 6543 either: pg_dump needs a real
+          # session, which that one does not provide. The session pooler gives
+          # both a session and an IPv4 address, which is why it is the one.
           PGCONNECTION: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           if [ -z "$PGCONNECTION" ]; then
