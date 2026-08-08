@@ -36,6 +36,12 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends postgresql-client-17
 
+          # Put the freshly installed client ahead of the runner image's own,
+          # which is older and stays first on PATH otherwise. Installing 17 and
+          # then invoking a bare `pg_dump` silently used the image's copy, and
+          # the run failed with "server version mismatch" against a 17.6 server.
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+
       - name: Dump database
         env:
           # Full Postgres connection string, not the REST URL — and specifically
@@ -60,6 +66,10 @@ jobs:
           # The connection string embeds the database password, so mask it
           # before anything can echo it into the log (spec 6.4).
           echo "::add-mask::$PGCONNECTION"
+
+          # Recorded in the log so a future version mismatch is diagnosable
+          # from the run itself rather than by guessing.
+          echo "Using $(command -v pg_dump): $(pg_dump --version)"
 
           # --no-owner / --no-privileges: the dump is restored into a fresh
           # Supabase project whose role names differ, and ownership statements
