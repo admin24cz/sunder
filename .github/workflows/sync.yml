@@ -1,0 +1,108 @@
+name: Sync
+
+# Periodic import of new Garmin activities (spec section 2.2).
+#
+# The hourly schedule also keeps the Supabase project alive: a free project is
+# paused after seven days without requests, and this is what makes a separate
+# keepalive unnecessary.
+on:
+  schedule:
+    # Hourly, at 07 past. Off the hour deliberately — scheduled workflows
+    # cluster at :00 across all of GitHub and get delayed under that load.
+    - cron: '7 * * * *'
+  workflow_dispatch:
+    inputs:
+      verbose:
+        description: 'Verbose logging (never logs credentials)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  # Used only by the failure step, which opens an issue after repeated failures.
+  issues: write
+
+# Never two runs at once. They would hit Garmin in parallel from the same
+# account, which is precisely the pattern the per-request pacing exists to
+# avoid, and they would race each other writing the same activities.
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Import activities
+    runs-on: ubuntu-latest
+    # A stuck Garmin request must not hold a runner for six hours. Generous
+    # enough for a backfill across several users, short enough to notice.
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        working-directory: services/sync
+        run: uv sync --no-dev
+
+      - name: Run sync
+        id: sync
+        working-directory: services/sync
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          # Bypasses RLS. The sync writes on behalf of users who are not present
+          # to authenticate, which is the one legitimate use of this key.
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Decrypts the stored Garmin passwords. Never leaves this job.
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+        run: |
+          # Explicit masking (spec 6.4). GitHub masks secrets in log output
+          # already, but only those it knows are secrets — this covers the case
+          # of one being derived or re-exported by a later step.
+          echo "::add-mask::$SUPABASE_SERVICE_ROLE_KEY"
+          echo "::add-mask::$ENCRYPTION_KEY"
+
+          set +e
+          uv run python -m sunder_sync.cli
+          code=$?
+          set -e
+
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+          # Exit code 2 means the run completed but some users failed. That is a
+          # partial success — the other users did import — so the job stays
+          # green and the failure is reported through sync_runs and the step
+          # summary rather than by failing the workflow.
+          if [ "$code" = "2" ]; then
+            echo "### ⚠️ Některé účty se nesynchronizovaly" >> "$GITHUB_STEP_SUMMARY"
+            echo "Detaily jsou v tabulce \`sync_runs\`." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          exit $code
+
+      # Spec 7.5: Garmin changing its login flow is an expected event, and it
+      # would otherwise show up only as a workflow nobody looks at. One issue
+      # per day at most, so a persistent outage does not create a hundred.
+      - name: Report a hard failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          title="Synchronizace s Garminem selhala ($(date -u +%Y-%m-%d))"
+
+          existing=$(gh issue list --search "$title in:title" --state open --json number --jq 'length')
+          if [ "$existing" != "0" ]; then
+            echo "An open issue for today already exists; not creating another."
+            exit 0
+          fi
+
+          gh issue create \
+            --title "$title" \
+            --body "Workflow \`sync.yml\` selhal: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Nejde o selhání jednoho uživatele — to by workflow nechalo zelené a zapsalo do \`sync_runs\`. Tohle znamená, že spadl celý běh: chybí secret, nejde Supabase, nebo Garmin změnil přihlašovací flow (spec 7.5)." \
+          || echo "::warning::Could not create issue"
