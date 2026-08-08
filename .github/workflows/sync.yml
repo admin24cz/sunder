@@ -58,12 +58,15 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           # Decrypts the stored Garmin passwords. Never leaves this job.
           ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          # Unseals credentials written by the link-garmin Edge Function (ADR 0002).
+          CREDENTIAL_PRIVATE_KEY: ${{ secrets.CREDENTIAL_PRIVATE_KEY }}
         run: |
           # Explicit masking (spec 6.4). GitHub masks secrets in log output
           # already, but only those it knows are secrets — this covers the case
           # of one being derived or re-exported by a later step.
           echo "::add-mask::$SUPABASE_SERVICE_ROLE_KEY"
           echo "::add-mask::$ENCRYPTION_KEY"
+          echo "::add-mask::$CREDENTIAL_PRIVATE_KEY"
 
           set +e
           uv run python -m sunder_sync.cli

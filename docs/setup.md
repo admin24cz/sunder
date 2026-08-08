@@ -59,17 +59,31 @@ cd services/sync && uv sync --all-extras && cd ../..
 > Postgres session, so use the **direct** connection string, not the transaction
 > pooler one.
 
-Generate the two encryption keys yourself:
+Generate the encryption keys yourself:
 
 ```bash
 openssl rand -hex 32   # -> ENCRYPTION_KEY
 openssl rand -hex 32   # -> BACKUP_ENCRYPTION_KEY
 ```
 
-> **`ENCRYPTION_KEY` has no recovery path.** It is deliberately not stored in the
-> database (spec 6.1), so if you lose it, every stored Garmin credential becomes
-> permanently undecryptable and every user has to re-link their account. Keep a
-> copy in a password manager before going further.
+And the credential keypair (see [ADR 0002](adr/0002-asymmetric-credential-sealing.md)):
+
+```bash
+cd services/sync
+uv run python -c "from sunder_sync.crypto import generate_keypair; \
+p, k = generate_keypair(); print('CREDENTIAL_PRIVATE_KEY=' + p); \
+print('CREDENTIAL_PUBLIC_KEY=' + k)"
+```
+
+The **public** half goes to the Edge Function and is not a secret — that is the
+whole point of the design: the component that writes credentials cannot read
+them back. The **private** half is a GitHub Secret and belongs nowhere else.
+
+> **`ENCRYPTION_KEY` and `CREDENTIAL_PRIVATE_KEY` have no recovery path.**
+> Neither is stored in the database, by design (spec 6.1, ADR 0002). Lose either
+> and the credentials encrypted under it become permanently unreadable, and every
+> affected user has to re-link their account. Put both in a password manager
+> before going any further.
 
 ---
 
@@ -84,10 +98,18 @@ openssl rand -hex 32   # -> BACKUP_ENCRYPTION_KEY
 | `SUPABASE_SERVICE_ROLE_KEY` | sync |
 | `SUPABASE_DB_URL` | backup |
 | `ENCRYPTION_KEY` | sync |
+| `CREDENTIAL_PRIVATE_KEY` | sync |
 | `BACKUP_ENCRYPTION_KEY` | backup |
 
+Then configure the Edge Function, which needs the **public** half:
+
+```bash
+supabase secrets set CREDENTIAL_PUBLIC_KEY=<public key>
+supabase functions deploy link-garmin
+```
+
 Garmin credentials are **not** secrets here — they arrive from users through the
-UI and are stored encrypted in Supabase.
+UI and are stored sealed in Supabase.
 
 For local development, copy `.env.example` to `.env` and fill in the same
 values. `.env` is gitignored and gitleaks will block it if that ever changes.
