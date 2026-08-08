@@ -1,3 +1,10 @@
+/* eslint-disable @typescript-eslint/consistent-type-definitions --
+ * These must be type aliases, not interfaces. supabase-js constrains a table's
+ * Row to Record<string, unknown>; a TS interface has no implicit index signature
+ * and silently fails that constraint, which collapses every query's result type
+ * to never and makes .maybeSingle() appear to always return null. A type alias
+ * does have the implicit index signature and resolves correctly.
+ */
 /**
  * Types for the Supabase schema.
  *
@@ -17,13 +24,13 @@ export type ActivityType = 'running' | 'cycling' | 'swimming';
 export type PersonalRecordCategory =
   '1k' | '5k' | '10k' | 'half_marathon' | 'marathon' | 'longest' | 'most_elevation';
 
-export interface Profile {
+export type Profile = {
   id: string;
   display_name: string | null;
   created_at: string;
-}
+};
 
-export interface Activity {
+export type Activity = {
   id: string;
   user_id: string;
   garmin_activity_id: number;
@@ -39,43 +46,44 @@ export interface Activity {
   track: GeoJSON.LineString | null;
   stream_path: string | null;
   created_at: string;
-}
+};
 
-export interface Segment {
+export type Segment = {
   id: string;
   user_id: string;
   name: string;
   geometry: GeoJSON.LineString;
   distance_meters: number | null;
   created_at: string;
-}
+};
 
-export interface SegmentEffort {
+export type SegmentEffort = {
   id: string;
   segment_id: string;
   activity_id: string;
   user_id: string;
   elapsed_seconds: number;
   started_at: string | null;
-}
+};
 
-export interface PersonalRecord {
+export type PersonalRecord = {
   id: string;
   user_id: string;
   category: PersonalRecordCategory;
   value: number;
   activity_id: string | null;
   achieved_at: string | null;
-}
+};
 
 /** Shape supabase-js expects, so `createClient<Database>` types every query. */
-export interface Database {
+export type Database = {
   public: {
     Tables: {
       profiles: {
         Row: Profile;
         Insert: never;
         Update: Partial<Pick<Profile, 'display_name'>>;
+        Relationships: [];
       };
       activities: {
         Row: Activity;
@@ -83,24 +91,37 @@ export interface Database {
         // written by the sync service with the service role.
         Insert: never;
         Update: never;
+        Relationships: [];
       };
       segments: {
         Row: Segment;
         Insert: Omit<Segment, 'id' | 'created_at'> & { id?: string };
         Update: Partial<Omit<Segment, 'id' | 'user_id' | 'created_at'>>;
+        Relationships: [];
       };
       segment_efforts: {
         Row: SegmentEffort;
         Insert: never;
         Update: never;
+        Relationships: [];
       };
       personal_records: {
         Row: PersonalRecord;
         Insert: never;
         Update: never;
+        Relationships: [];
       };
     };
-    Views: Record<never, never>;
+    Views: {
+      /**
+       * activities with the track as GeoJSON rather than EWKB, for the map.
+       * A security_invoker view, so the RLS policy on `activities` still applies.
+       */
+      activities_geo: {
+        Row: Omit<Activity, 'track'> & { track_geojson: GeoJSON.LineString | null };
+        Relationships: [];
+      };
+    };
     Functions: Record<never, never>;
     Enums: {
       activity_type: ActivityType;
@@ -108,4 +129,4 @@ export interface Database {
     };
     CompositeTypes: Record<never, never>;
   };
-}
+};
