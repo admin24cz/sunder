@@ -1,0 +1,68 @@
+# Supabase project configuration.
+#
+# Declarative, versioned, and pushed with:
+#
+#     supabase config push --project-ref iryznyynvlxxwzezvyiq
+#
+# WHY this file exists rather than dashboard clicks: spec section 6.6 makes
+# closed registration a security control, and a control that lives only as a
+# toggle in a web UI has no history, no review, and no way to notice when
+# somebody changes it. Here it is a line in a commit.
+#
+# Note that `config push` is declarative — it applies this whole file, so
+# anything set in the dashboard and not written here is reset to the value
+# below. Change settings here, not there.
+
+project_id = "iryznyynvlxxwzezvyiq"
+
+[auth]
+# Where auth redirects land. Update once the GitHub Pages URL exists; until
+# then only local development uses a redirect at all.
+site_url = "http://localhost:5173"
+additional_redirect_urls = ["http://localhost:5173"]
+
+# One hour, the default. Short enough that a stolen token expires on its own,
+# long enough that the refresh in AuthProvider is not constantly running.
+jwt_expiry = 3600
+enable_refresh_token_rotation = true
+refresh_token_reuse_interval = 10
+
+# Spec 6.6: a public repository is not a public app. The instance starts closed
+# and is opened deliberately — flipping this to true is the entire "open to the
+# public" step, and it should arrive as a reviewed commit.
+enable_signup = false
+
+# No anonymous sessions. Every policy in this schema targets `authenticated`,
+# and an anonymous user would satisfy that role while owning no rows — a
+# combination worth never creating in the first place.
+enable_anonymous_sign_ins = false
+
+[auth.email]
+enable_signup = false
+# Confirming both the old and the new address on a change, so a stolen session
+# cannot quietly move an account to an attacker's mailbox.
+double_confirm_changes = true
+enable_confirmations = true
+secure_password_change = true
+
+# Declared explicitly because `config push` is declarative: the first push left
+# these out, and the CLI's defaults silently weakened both — one email per
+# second instead of per minute, and a 6-digit code instead of 8. Anything worth
+# having a value must be written here, not left to a default.
+max_frequency = "1m0s"
+otp_length = 8
+otp_expiry = 3600
+
+[auth.email.template]
+# Left at defaults; the built-in free-tier mailer is rate-limited and is only
+# used for the owner's own account while the instance is single-user.
+
+[auth.sms]
+enable_signup = false
+enable_confirmations = false
+
+[functions.link-garmin]
+# The function derives the user id from the caller's JWT, so an unverified
+# request has no identity to store a credential against. Enforcing verification
+# at the platform edge as well means a bug in the function cannot skip it.
+verify_jwt = true
