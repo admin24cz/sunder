@@ -157,6 +157,58 @@ def test_builtin_network_errors_are_transient(exc: Exception) -> None:
     assert isinstance(classify_exception(exc), GarminUnavailableError)
 
 
+@pytest.mark.parametrize(
+    "message",
+    [
+        # The exact text seen in production: garminconnect logs the 429 for each
+        # login transport it tries, then raises an authentication error.
+        "Mobile login returned 429 — IP rate limited by Garmin",
+        "429 Too Many Requests",
+        "Rate limit exceeded",
+        "ratelimited",
+    ],
+)
+def test_a_rate_limit_in_the_message_is_not_mistaken_for_bad_credentials(
+    message: str,
+) -> None:
+    """The failure that marked a working account auth_failed in production.
+
+    garminconnect raises `GarminConnectAuthenticationError` after every login
+    transport received a 429, with the status code discarded. Classifying on the
+    type name alone made a temporary IP throttle look like a wrong password —
+    and spec 7.3 skips an auth_failed connection until the user re-links, so a
+    transient block permanently disabled the sync.
+    """
+    exc = type("GarminConnectAuthenticationError", (Exception,), {})(message)
+    error = classify_exception(exc)
+    assert isinstance(error, GarminRateLimitedError)
+    assert error.connection_status is ConnectionStatus.RATE_LIMITED
+
+
+def test_a_rate_limit_is_found_through_a_chained_cause() -> None:
+    inner = Exception("Mobile login returned 429 — IP rate limited by Garmin")
+    outer = type("GarminConnectAuthenticationError", (Exception,), {})("login failed")
+    outer.__cause__ = inner
+    assert isinstance(classify_exception(outer), GarminRateLimitedError)
+
+
+def test_a_genuine_auth_failure_is_still_reported_as_one() -> None:
+    """The fix must not turn every failure into a rate limit."""
+    exc = type("GarminConnectAuthenticationError", (Exception,), {})("Invalid credentials")
+    error = classify_exception(exc)
+    assert isinstance(error, GarminAuthError)
+    assert error.connection_status is ConnectionStatus.AUTH_FAILED
+
+
+def test_message_matching_does_not_loop_on_a_self_referential_chain() -> None:
+    """A cause cycle must not hang the classifier."""
+    a = Exception("outer")
+    b = Exception("inner")
+    a.__cause__ = b
+    b.__cause__ = a
+    assert classify_exception(a) is not None
+
+
 def test_a_rate_limit_wins_over_the_type_name() -> None:
     """A 429 delivered as a connection error must still stop the run."""
     exc = type("GarminConnectConnectionError", (Exception,), {})()

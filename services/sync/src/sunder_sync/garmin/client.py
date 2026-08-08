@@ -89,6 +89,43 @@ def _status_code_of(exc: BaseException) -> int | None:
     return None
 
 
+_RATE_LIMIT_MARKERS = (
+    "429",
+    "too many requests",
+    "rate limit",
+    "rate-limit",
+    "ratelimit",
+)
+
+
+def _mentions_rate_limit(exc: BaseException) -> bool:
+    """Whether this exception, or anything it wraps, describes a rate limit.
+
+    Necessary because `garminconnect` tries several login transports, logs the
+    429 each one receives, and then raises a generic authentication error with
+    the status code discarded. Without this, a temporary IP-based throttle is
+    indistinguishable from a wrong password.
+
+    That distinction is not cosmetic. Spec 7.3 skips an `auth_failed`
+    connection until the user re-links, so misreading a throttle as bad
+    credentials permanently disables a working account and tells its owner to
+    change a password that was never the problem.
+
+    Matching on text is unpleasant and is the fallback, not the primary path —
+    `_status_code_of` is tried first. It earns its place because the
+    alternative is silently getting this exact case wrong.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        text = str(current).lower()
+        if any(marker in text for marker in _RATE_LIMIT_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def classify_exception(exc: BaseException) -> GarminError:
     """Translate a library exception into this package's vocabulary.
 
@@ -119,6 +156,14 @@ def classify_exception(exc: BaseException) -> GarminError:
     name = type(exc).__name__
     if "TooManyRequests" in name or "RateLimit" in name:
         return GarminRateLimitedError("Garmin rate limited the request")
+
+    # Checked before the auth branch, and deliberately so. `garminconnect`
+    # raises an authentication error after every login transport received a
+    # 429, so trusting the type name here would mark a throttled connection
+    # `auth_failed` and stop retrying it forever.
+    if _mentions_rate_limit(exc):
+        return GarminRateLimitedError("Garmin rate limited the request")
+
     if "Authentication" in name or "Login" in name:
         return GarminAuthError("Garmin rejected the credentials")
     if isinstance(exc, TimeoutError | ConnectionError) or "Connection" in name or "Timeout" in name:
