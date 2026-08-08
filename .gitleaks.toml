@@ -1,0 +1,48 @@
+# gitleaks configuration.
+#
+# The allowlists below are deliberately narrow. A blanket exclusion — a whole
+# directory, or the `generic-api-key` rule switched off — would turn the secret
+# scan back into something that looks like it is running and is not, which is
+# the exact failure this repository already hit once.
+#
+# Each entry names a specific file and a specific pattern, and says why the
+# match is not a secret. Anything that does not fit one of these still fails.
+
+title = "Sunder"
+
+[extend]
+# Keep every default rule. These add to them, they do not replace them.
+useDefault = true
+
+# ---------------------------------------------------------------------------
+[[allowlists]]
+description = """
+Type annotations, not values. `credential_private_key: X25519PrivateKey` is a
+dataclass field declaration; the generic-api-key rule sees `identifier: value`
+and cannot tell a Python type hint from an assignment.
+"""
+regexTarget = "line"
+regexes = [
+  '''credential_private_key:\s*X25519PrivateKey''',
+]
+
+# ---------------------------------------------------------------------------
+[[allowlists]]
+description = """
+The deterministic AES key the crypto tests encrypt with. Hardcoded on purpose so
+encryption tests are reproducible, and never used against any real database.
+"""
+paths = ['''services/sync/tests/conftest\.py''']
+regexes = ['''TEST_KEY_HEX\s*=''']
+
+# ---------------------------------------------------------------------------
+[[allowlists]]
+description = """
+The golden vector pinning the sealed-box wire format between the TypeScript Edge
+Function and the Python sync service. It contains a real X25519 keypair, which is
+the point: the fixture has to be openable for the interop test to mean anything.
+Both halves were generated for this file alone and guard nothing.
+"""
+paths = [
+  '''services/sync/tests/fixtures/sealed_credential_from_edge_function\.json''',
+]
