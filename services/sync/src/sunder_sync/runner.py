@@ -21,7 +21,7 @@ from sunder_sync.config import SyncConfig
 from sunder_sync.crypto import open_credential
 from sunder_sync.db import SyncRepository
 from sunder_sync.domain import ConnectionStatus
-from sunder_sync.garmin import GarminClient, GarminError
+from sunder_sync.garmin import GarminAuthError, GarminClient, GarminError
 from sunder_sync.models import GarminConnection, ParsedActivity, SyncOutcome
 from sunder_sync.parsers import parse_activity_summary, parse_track, simplify_track
 
@@ -84,24 +84,42 @@ def sync_user(
     Returns:
         What happened, including the status to record for this connection.
     """
-    # Decryption comes first, before any client exists. A credential we cannot
-    # read means there is nothing to log in with, so building a session object
-    # would be wasted work — and on a run following a botched key rotation, that
-    # is every user.
+    if not connection.has_credential:
+        raise GarminAuthError("connection has neither session tokens nor a password")
+
+    # Decryption happens before the client is built, and the structure enforces
+    # that rather than relying on statement order: `open_credential` is called
+    # while choosing which credential to use, and `client_factory()` only after.
+    #
+    # This ordering was lost once already in a refactor and caught by a test. A
+    # credential we cannot read means there is nothing to log in with, so
+    # building a session object is wasted work — and after a botched key
+    # rotation, that is every user.
     #
     # The ciphertext is bound to the user id, so a payload moved onto another
     # row fails here rather than logging into the wrong Garmin account.
-    password = open_credential(
-        connection.encrypted_password,
-        user_id=connection.user_id,
-        keys=config.credential_keys,
-    )
+    sealed = connection.encrypted_tokens
+    use_tokens = sealed is not None
+    if sealed is None:
+        sealed = connection.encrypted_password
+    if sealed is None:  # pragma: no cover - `has_credential` already ruled it out
+        raise GarminAuthError("connection has neither session tokens nor a password")
+
+    credential = open_credential(sealed, user_id=connection.user_id, keys=config.credential_keys)
 
     client = client_factory()
-    client.login(connection.garmin_email, password)
+    if use_tokens:
+        # Preferred path (ADR 0003): resuming a session makes no login request,
+        # so an account with two-factor authentication works unattended.
+        client.resume(credential, email=connection.garmin_email)
+    else:
+        # Legacy path, for connections created before tokens existed. Fails on
+        # any account with a second factor, which is why it is not the default.
+        client.login(connection.garmin_email, credential)
+
     # Drop the only remaining reference. CPython cannot zero the string, but
     # this at least ends its reachability at the earliest possible point.
-    del password
+    del credential
 
     summaries = client.list_activities(start=0, limit=config.max_activities_per_user)
     parsed = _parse_summaries(summaries)

@@ -16,6 +16,7 @@ import pytest
 from sunder_sync.crypto import Secret
 from sunder_sync.domain import ConnectionStatus
 from sunder_sync.garmin import (
+    GarminApi,
     GarminAuthError,
     GarminClient,
     GarminMfaRequiredError,
@@ -46,10 +47,14 @@ class FakeGarminApi:
         self.activities_error = activities_error
         self.activities = activities if activities is not None else []
         self.login_calls = 0
+        #: What `login` was given each time — None for a password login, the
+        #: token string when a session was resumed.
+        self.tokenstores: list[str | None] = []
         self.list_calls: list[tuple[int, int]] = []
 
-    def login(self) -> object:
+    def login(self, tokenstore: str | None = None) -> object:
         self.login_calls += 1
+        self.tokenstores.append(tokenstore)
         if self.login_error is not None:
             raise self.login_error
         return object()
@@ -74,12 +79,12 @@ class FakeHttpError(Exception):
 
 def build_client(
     api: FakeGarminApi, clock: FakeClock | None = None
-) -> tuple[GarminClient, FakeClock, list[tuple[str, str]]]:
+) -> tuple[GarminClient, FakeClock, list[tuple[str | None, str | None]]]:
     """Build a client wired to `api`, with a fake clock and a factory spy."""
     clock = clock if clock is not None else FakeClock()
-    factory_calls: list[tuple[str, str]] = []
+    factory_calls: list[tuple[str | None, str | None]] = []
 
-    def factory(email: str, password: str) -> FakeGarminApi:
+    def factory(email: str | None, password: str | None) -> GarminApi:
         factory_calls.append((email, password))
         return api
 

@@ -47,8 +47,13 @@ backfill, which spec 7.2 wants spread across runs anyway.
 class GarminApi(Protocol):
     """The slice of the Garmin library this client actually uses."""
 
-    def login(self) -> object:
-        """Authenticate. Raises on bad credentials."""
+    def login(self, tokenstore: str | None = None) -> object:
+        """Authenticate, resuming a stored session when one is supplied.
+
+        With `tokenstore`, the previously issued OAuth tokens are used and no
+        login happens at all — which is what makes an account with two-factor
+        authentication usable from an unattended run (ADR 0003).
+        """
         ...
 
     def get_activities(self, start: int, limit: int) -> Sequence[dict[str, Any]]:
@@ -60,12 +65,16 @@ class GarminApi(Protocol):
         ...
 
 
-type GarminApiFactory = Callable[[str, str], GarminApi]
-"""Builds an API object from an email and a **plaintext** password.
+type GarminApiFactory = Callable[[str | None, str | None], GarminApi]
+"""Builds an API object, optionally from an email and a **plaintext** password.
 
-Takes the revealed password because the underlying library needs it. Keep
-implementations trivial — construct the object and return it, nothing else —
-so the plaintext's lifetime stays as short as possible.
+Both arguments are None when resuming a stored session, which needs no
+credentials at all — the tokens are handed to `login()` instead.
+
+When a password is passed it is the revealed plaintext, because the underlying
+library takes nothing else. Keep implementations trivial — construct the object
+and return it, nothing more — so the plaintext's lifetime stays as short as it
+can be.
 """
 
 
@@ -262,6 +271,43 @@ class GarminClient:
         # traceback can hold the request that carried the password.
         self._api = self._retry_policy.call(attempt, description=f"Garmin login for {email}")
         logger.info("Garmin login succeeded for %s", email)
+
+    def resume(self, tokens: Secret, *, email: str) -> None:
+        """Resume a previously authenticated session from stored tokens.
+
+        The preferred way in (ADR 0003). No login request is made, so an account
+        with two-factor authentication works — the code was supplied once,
+        interactively, when the tokens were issued.
+
+        Args:
+            tokens: The serialised OAuth tokens, wrapped. Revealed on one line.
+            email: Used only for log messages, so a failure names the account.
+
+        Raises:
+            GarminAuthError: The tokens were rejected — expired, or revoked from
+                Garmin's device list. The user has to authenticate again; there
+                is nothing to retry.
+            GarminRateLimitedError: Garmin is throttling; stop for this user.
+            GarminUnavailableError: Transient failure that survived every retry.
+        """
+        self._rate_limiter.wait()
+
+        def attempt() -> GarminApi:
+            try:
+                # No credentials are passed to the constructor at all — the
+                # session is carried entirely by the tokens.
+                api = self._api_factory(None, None)
+                api.login(tokens.reveal())
+            except GarminError:
+                raise
+            except Exception as exc:
+                raise classify_exception(exc) from None
+            return api
+
+        self._api = self._retry_policy.call(
+            attempt, description=f"Garmin session resume for {email}"
+        )
+        logger.info("Garmin session resumed for %s", email)
 
     def list_activities(
         self, *, start: int = 0, limit: int = DEFAULT_PAGE_SIZE

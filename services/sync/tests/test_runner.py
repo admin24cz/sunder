@@ -8,7 +8,7 @@ working one and assert that the working one still finishes.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -22,6 +22,7 @@ from sunder_sync.crypto import (
 )
 from sunder_sync.domain import ConnectionStatus
 from sunder_sync.garmin import (
+    GarminApi,
     GarminAuthError,
     GarminClient,
     GarminRateLimitedError,
@@ -156,7 +157,7 @@ def client_factory_for(*apis: FakeGarminApi) -> Callable[[], GarminClient]:
         api = remaining.pop(0)
         clock = FakeClock()
         return GarminClient(
-            api_factory=lambda _email, _password: api,
+            api_factory=lambda _email, _password: cast(GarminApi, api),
             rate_limiter=RateLimiter(sleep=clock.sleep, monotonic=clock.monotonic),
             retry_policy=RetryPolicy(sleep=clock.sleep, jitter=lambda: 0.0),
         )

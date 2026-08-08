@@ -151,7 +151,10 @@ class SyncRepository:
             "/rest/v1/garmin_connections",
             operation="listing connections",
             params={
-                "select": "user_id,garmin_email,garmin_password_encrypted,status,last_sync_at",
+                "select": (
+                    "user_id,garmin_email,garmin_tokens_encrypted,"
+                    "garmin_password_encrypted,status,last_sync_at"
+                ),
                 "status": f"in.({','.join(syncable)})",
             },
         )
@@ -162,12 +165,34 @@ class SyncRepository:
                 GarminConnection(
                     user_id=row["user_id"],
                     garmin_email=row["garmin_email"],
-                    encrypted_password=decode_bytea(row["garmin_password_encrypted"]),
+                    encrypted_tokens=_decode_optional_bytea(row.get("garmin_tokens_encrypted")),
+                    encrypted_password=_decode_optional_bytea(row.get("garmin_password_encrypted")),
                     status=ConnectionStatus(row["status"]),
                     last_sync_at=_parse_optional_timestamp(row.get("last_sync_at")),
                 )
             )
         return connections
+
+    def store_tokens(self, user_id: str, sealed_tokens: bytes) -> None:
+        """Save sealed session tokens and drop the stored password.
+
+        The password is cleared in the same write, not left behind. Once tokens
+        exist it is dead weight, and a password is the thing worth stealing —
+        keeping one "just in case" is how a credential outlives its purpose
+        (ADR 0003).
+        """
+        self._request(
+            "PATCH",
+            "/rest/v1/garmin_connections",
+            operation="storing session tokens",
+            params={"user_id": f"eq.{user_id}"},
+            json={
+                "garmin_tokens_encrypted": encode_bytea(sealed_tokens),
+                "garmin_password_encrypted": None,
+                "status": ConnectionStatus.ACTIVE.value,
+                "last_error": None,
+            },
+        )
 
     def update_connection(
         self,
@@ -341,6 +366,17 @@ class SyncRepository:
                 "errors": errors,
             },
         )
+
+
+def _decode_optional_bytea(value: object) -> bytes | None:
+    """Decode a nullable `bytea` column.
+
+    A connection now carries tokens, a password, or both, so either column can
+    legitimately come back null.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    return decode_bytea(value)
 
 
 def _parse_optional_timestamp(value: object) -> datetime | None:

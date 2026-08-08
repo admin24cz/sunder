@@ -34,17 +34,39 @@ class TrackPoint:
 class GarminConnection:
     """A user's Garmin link, as read from the database.
 
-    Deliberately carries the password as raw ciphertext rather than a decrypted
-    `Secret`. Decryption happens at the moment of login and nowhere else, so a
-    connection object can be logged, held in a list, or included in an error
-    report without any risk of exposing a credential.
+    Deliberately carries the credential as raw ciphertext rather than a
+    decrypted `Secret`. Decryption happens at the moment of login and nowhere
+    else, so a connection object can be logged, held in a list, or included in
+    an error report without any risk of exposing anything.
+
+    A connection carries session tokens, a password, or both. Tokens are
+    preferred: they survive two-factor authentication, which a password login
+    cannot, and they are a much smaller thing to hold on someone's behalf
+    (ADR 0003).
     """
 
     user_id: str
     garmin_email: str
-    encrypted_password: bytes
     status: ConnectionStatus
+
+    #: Sealed OAuth tokens from an interactive login. The preferred credential.
+    encrypted_tokens: bytes | None = None
+
+    #: Sealed password, for connections created before tokens existed. Kept as a
+    #: fallback so those accounts keep working until they are migrated.
+    encrypted_password: bytes | None = None
+
     last_sync_at: datetime | None = None
+
+    @property
+    def has_credential(self) -> bool:
+        """Whether there is anything here to authenticate with.
+
+        A row with neither is rejected by a database constraint, so this should
+        never be false in practice — but the sync checks rather than trusting
+        it, because the alternative is a confusing failure deep inside a login.
+        """
+        return self.encrypted_tokens is not None or self.encrypted_password is not None
 
 
 @dataclass(frozen=True, slots=True)

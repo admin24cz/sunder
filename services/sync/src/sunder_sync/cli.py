@@ -58,6 +58,14 @@ def main() -> int:
     """
     configure_logging()
 
+    # One subcommand, dispatched before anything else: `authorize` is
+    # interactive and needs neither the encryption key nor the private key, so
+    # it must not be blocked by a config check meant for the sync run.
+    if len(sys.argv) > 1 and sys.argv[1] == "authorize":
+        from sunder_sync.authorize import run_authorize
+
+        return run_authorize(sys.argv[2:])
+
     try:
         config = SyncConfig.from_env()
     except ConfigError as exc:
