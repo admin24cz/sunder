@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from sunder_sync.config import SyncConfig
-from sunder_sync.crypto import decrypt_password
+from sunder_sync.crypto import open_credential
 from sunder_sync.db import SyncRepository
 from sunder_sync.domain import ConnectionStatus
 from sunder_sync.garmin import GarminClient, GarminError
@@ -91,10 +91,10 @@ def sync_user(
     #
     # The ciphertext is bound to the user id, so a payload moved onto another
     # row fails here rather than logging into the wrong Garmin account.
-    password = decrypt_password(
+    password = open_credential(
         connection.encrypted_password,
         user_id=connection.user_id,
-        key=config.encryption_key,
+        keys=config.credential_keys,
     )
 
     client = client_factory()

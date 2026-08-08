@@ -14,7 +14,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Self
 
-from sunder_sync.crypto import load_encryption_key
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+from sunder_sync.crypto import CredentialKeys, load_encryption_key, parse_private_key
 
 DEFAULT_MAX_ACTIVITIES_PER_USER = 50
 """Ceiling on how many activities one run imports for one user.
@@ -39,7 +41,16 @@ class SyncConfig:
     supabase_url: str
     service_role_key: str
     encryption_key: bytes
+    credential_private_key: X25519PrivateKey
     max_activities_per_user: int = DEFAULT_MAX_ACTIVITIES_PER_USER
+
+    @property
+    def credential_keys(self) -> CredentialKeys:
+        """Both keys needed to read a stored credential, in either format."""
+        return CredentialKeys(
+            encryption_key=self.encryption_key,
+            credential_private_key=self.credential_private_key,
+        )
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Self:
@@ -69,6 +80,14 @@ class SyncConfig:
             # the crypto layer's message is already safe to show.
             raise ConfigError(str(exc)) from exc
 
+        raw_private = source.get("CREDENTIAL_PRIVATE_KEY", "").strip()
+        if not raw_private:
+            raise ConfigError("CREDENTIAL_PRIVATE_KEY is not set (see docs/setup.md and ADR 0002)")
+        try:
+            credential_private_key = parse_private_key(raw_private)
+        except Exception as exc:
+            raise ConfigError(str(exc)) from exc
+
         raw_max = source.get("SUNDER_MAX_ACTIVITIES_PER_USER", "").strip()
         max_activities = DEFAULT_MAX_ACTIVITIES_PER_USER
         if raw_max:
@@ -83,5 +102,6 @@ class SyncConfig:
             supabase_url=url,
             service_role_key=service_role_key,
             encryption_key=encryption_key,
+            credential_private_key=credential_private_key,
             max_activities_per_user=max_activities,
         )

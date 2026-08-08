@@ -13,7 +13,13 @@ from typing import Any
 import pytest
 
 from sunder_sync.config import SyncConfig
-from sunder_sync.crypto import Secret, encrypt_password
+from sunder_sync.crypto import (
+    Secret,
+    generate_keypair,
+    parse_private_key,
+    parse_public_key,
+    seal_password,
+)
 from sunder_sync.domain import ConnectionStatus
 from sunder_sync.garmin import (
     GarminAuthError,
@@ -28,6 +34,10 @@ from tests.conftest import TEST_KEY
 from tests.test_garmin_client import FakeGarminApi
 from tests.test_throttle import FakeClock
 
+_PRIVATE_B64, _PUBLIC_B64 = generate_keypair()
+CREDENTIAL_PRIVATE_KEY = parse_private_key(_PRIVATE_B64)
+CREDENTIAL_PUBLIC_KEY = parse_public_key(_PUBLIC_B64)
+
 ALICE = "11111111-1111-4111-8111-111111111111"
 BOB = "22222222-2222-4222-8222-222222222222"
 
@@ -36,7 +46,9 @@ def connection(user_id: str, password: str = "garmin-password") -> GarminConnect
     return GarminConnection(
         user_id=user_id,
         garmin_email=f"{user_id[:4]}@example.com",
-        encrypted_password=encrypt_password(Secret(password), user_id=user_id, key=TEST_KEY),
+        encrypted_password=seal_password(
+            Secret(password), user_id=user_id, public_key=CREDENTIAL_PUBLIC_KEY
+        ),
         status=ConnectionStatus.ACTIVE,
     )
 
@@ -129,6 +141,7 @@ def make_config(**overrides: Any) -> SyncConfig:
         "supabase_url": "https://project.supabase.co",
         "service_role_key": "sb_secret_test",
         "encryption_key": TEST_KEY,
+        "credential_private_key": CREDENTIAL_PRIVATE_KEY,
         "max_activities_per_user": 50,
     }
     defaults.update(overrides)
@@ -281,7 +294,7 @@ def test_a_credential_that_cannot_be_decrypted_fails_only_that_user() -> None:
     corrupted = GarminConnection(
         user_id=ALICE,
         garmin_email="alice@example.com",
-        encrypted_password=b"\x01not a real payload",
+        encrypted_password=b"\x02not a real payload",
         status=ConnectionStatus.ACTIVE,
     )
     repo = FakeRepository([corrupted, connection(BOB)])

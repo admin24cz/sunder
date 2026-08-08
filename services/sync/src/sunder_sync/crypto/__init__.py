@@ -22,6 +22,15 @@ from sunder_sync.crypto.errors import (
     MissingEncryptionKeyError,
 )
 from sunder_sync.crypto.keys import ENCRYPTION_KEY_ENV, KEY_BYTES, load_encryption_key, parse_key
+from sunder_sync.crypto.opening import CredentialKeys, open_credential
+from sunder_sync.crypto.sealing import (
+    VERSION_SEALED_BOX,
+    generate_keypair,
+    parse_private_key,
+    parse_public_key,
+    seal_password,
+    unseal_password,
+)
 from sunder_sync.crypto.secret import Secret
 
 __all__ = [
@@ -29,6 +38,8 @@ __all__ = [
     "KEY_BYTES",
     "NONCE_BYTES",
     "VERSION_AES_256_GCM",
+    "VERSION_SEALED_BOX",
+    "CredentialKeys",
     "CryptoError",
     "DecryptionError",
     "InvalidEncryptionKeyError",
@@ -36,6 +47,12 @@ __all__ = [
     "Secret",
     "decrypt_password",
     "encrypt_password",
+    "generate_keypair",
     "load_encryption_key",
+    "open_credential",
+    "parse_private_key",
+    "parse_public_key",
+    "seal_password",
+    "unseal_password",
     "parse_key",
 ]
