@@ -26,7 +26,7 @@ from collections.abc import Callable
 
 from sunder_sync.crypto import Secret, parse_public_key, seal_password
 from sunder_sync.db import SyncRepository
-from sunder_sync.garmin import classify_exception
+from sunder_sync.garmin import capture_library_diagnostics, classify_exception
 
 logger = logging.getLogger(__name__)
 
@@ -94,14 +94,18 @@ def authorize(
         return code
 
     try:
-        api = Garmin(garmin_email, password.reveal(), prompt_mfa=prompt_mfa)
-        api.login()
+        with capture_library_diagnostics() as diagnostics:
+            api = Garmin(garmin_email, password.reveal(), prompt_mfa=prompt_mfa)
+            api.login()
     except AuthorizationError:
         raise
     except Exception as exc:
+        # The libraries log why they failed and then raise something generic, so
+        # the captured messages are what makes the reported reason accurate.
         # `from None`: the original traceback can hold the request that carried
         # the password.
-        raise AuthorizationError(f"Garmin login failed: {classify_exception(exc)}") from None
+        reason = classify_exception(exc, diagnostics=diagnostics)
+        raise AuthorizationError(f"Garmin login failed: {reason}") from None
     finally:
         # The plaintext has served its only purpose. It is not stored, and this
         # ends its reachability as early as CPython allows.

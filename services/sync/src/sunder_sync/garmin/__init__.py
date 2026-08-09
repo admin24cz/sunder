@@ -5,6 +5,7 @@ from sunder_sync.garmin.client import (
     GarminApi,
     GarminApiFactory,
     GarminClient,
+    capture_library_diagnostics,
     classify_exception,
 )
 from sunder_sync.garmin.errors import (
@@ -39,5 +40,6 @@ __all__ = [
     "GarminUnavailableError",
     "RateLimiter",
     "RetryPolicy",
+    "capture_library_diagnostics",
     "classify_exception",
 ]

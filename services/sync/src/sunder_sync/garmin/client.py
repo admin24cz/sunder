@@ -19,7 +19,8 @@ never to touch the network (spec 11.2).
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager, suppress
 from typing import Any, Protocol
 
 from sunder_sync.crypto import Secret
@@ -148,7 +149,63 @@ def _mentions_rate_limit(exc: BaseException) -> bool:
     return _chain_mentions(exc, _RATE_LIMIT_MARKERS)
 
 
-def classify_exception(exc: BaseException) -> GarminError:
+class _RecordCollector(logging.Handler):
+    """Collects log messages emitted while a login is attempted."""
+
+    def __init__(self, sink: list[str]) -> None:
+        super().__init__(level=logging.DEBUG)
+        self._sink = sink
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Store the formatted message, ignoring anything unformattable.
+
+        Swallowing the failure is right here: this handler exists to improve an
+        error message, and a malformed log record must never be the reason a
+        login fails.
+        """
+        with suppress(Exception):
+            self._sink.append(record.getMessage())
+
+
+@contextmanager
+def capture_library_diagnostics() -> Iterator[list[str]]:
+    """Collect what the Garmin libraries log during the block.
+
+    The libraries know far more than they raise. A login that receives 429 from
+    every transport logs each one and then raises a generic authentication
+    error with the status discarded — so the exception says "bad credentials"
+    about an account whose password is fine.
+
+    This has now caused two wrong diagnoses in production, each pointing the
+    user at something that was not the problem. Reading the log rather than
+    guessing from the exception turns information the library already has into
+    information the classifier can use.
+
+    Yields:
+        A list that fills with messages as they are logged.
+    """
+    messages: list[str] = []
+    handler = _RecordCollector(messages)
+    loggers = [logging.getLogger(name) for name in ("garminconnect", "garth")]
+
+    previous = [(log, log.level) for log in loggers]
+    for log in loggers:
+        log.addHandler(handler)
+        # The messages we need are logged at WARNING, but DEBUG costs nothing
+        # here and catches the transport-level detail too.
+        log.setLevel(logging.DEBUG)
+
+    try:
+        yield messages
+    finally:
+        for log, level in previous:
+            log.removeHandler(handler)
+            log.setLevel(level)
+
+
+def classify_exception(
+    exc: BaseException, *, diagnostics: Sequence[str] | None = None
+) -> GarminError:
     """Translate a library exception into this package's vocabulary.
 
     Classification order matters. The HTTP status is checked before the
@@ -157,12 +214,18 @@ def classify_exception(exc: BaseException) -> GarminError:
 
     Args:
         exc: Whatever the Garmin library raised.
+        diagnostics: Messages the library logged during the attempt, from
+            `capture_library_diagnostics`. Consulted when the exception itself
+            says nothing useful — which, for the two failures that matter most,
+            is every time.
 
     Returns:
         A `GarminError` whose `retryable` and `connection_status` describe what
         the caller should do. The message names the class of problem only —
         never the response body, which can contain a session token.
     """
+    logged = " ".join(diagnostics or ()).lower()
+
     status = _status_code_of(exc)
     if status is not None:
         if status == 429:
@@ -183,14 +246,16 @@ def classify_exception(exc: BaseException) -> GarminError:
     # raises an authentication error after every login transport received a
     # 429, so trusting the type name here would mark a throttled connection
     # `auth_failed` and stop retrying it forever.
-    if _mentions_rate_limit(exc):
-        return GarminRateLimitedError("Garmin rate limited the request")
+    if _mentions_rate_limit(exc) or any(m in logged for m in _RATE_LIMIT_MARKERS):
+        return GarminRateLimitedError(
+            "Garmin rate limited the login; the request never reached an authentication check"
+        )
 
     # Before the auth branch: Garmin raises an authentication error for a
     # second-factor prompt too, but the password was accepted and re-linking
     # would fail identically. Reporting it as bad credentials sends the user to
     # change a password that works.
-    if _chain_mentions(exc, _MFA_MARKERS):
+    if _chain_mentions(exc, _MFA_MARKERS) or any(m in logged for m in _MFA_MARKERS):
         return GarminMfaRequiredError(
             "Garmin requires a second factor, which an unattended sync cannot provide"
         )
@@ -254,18 +319,19 @@ class GarminClient:
         self._rate_limiter.wait()
 
         def attempt() -> GarminApi:
-            try:
-                # The single point at which the plaintext exists. Passed
-                # straight into the factory; the local goes out of scope with
-                # this frame, and no exception raised below can capture it,
-                # because the reveal happens outside the try that logs.
-                api = self._api_factory(email, password.reveal())
-                api.login()
-            except GarminError:
-                raise
-            except Exception as exc:
-                raise classify_exception(exc) from None
-            return api
+            with capture_library_diagnostics() as diagnostics:
+                try:
+                    # The single point at which the plaintext exists. Passed
+                    # straight into the factory; the local goes out of scope
+                    # with this frame, and no exception raised below can capture
+                    # it, because the reveal happens outside the try that logs.
+                    api = self._api_factory(email, password.reveal())
+                    api.login()
+                except GarminError:
+                    raise
+                except Exception as exc:
+                    raise classify_exception(exc, diagnostics=diagnostics) from None
+                return api
 
         # `from None` above, and no exception chaining here: the original
         # traceback can hold the request that carried the password.
@@ -293,16 +359,17 @@ class GarminClient:
         self._rate_limiter.wait()
 
         def attempt() -> GarminApi:
-            try:
-                # No credentials are passed to the constructor at all — the
-                # session is carried entirely by the tokens.
-                api = self._api_factory(None, None)
-                api.login(tokens.reveal())
-            except GarminError:
-                raise
-            except Exception as exc:
-                raise classify_exception(exc) from None
-            return api
+            with capture_library_diagnostics() as diagnostics:
+                try:
+                    # No credentials are passed to the constructor at all — the
+                    # session is carried entirely by the tokens.
+                    api = self._api_factory(None, None)
+                    api.login(tokens.reveal())
+                except GarminError:
+                    raise
+                except Exception as exc:
+                    raise classify_exception(exc, diagnostics=diagnostics) from None
+                return api
 
         self._api = self._retry_policy.call(
             attempt, description=f"Garmin session resume for {email}"

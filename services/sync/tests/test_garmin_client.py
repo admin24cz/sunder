@@ -25,6 +25,7 @@ from sunder_sync.garmin import (
     GarminUnavailableError,
     RateLimiter,
     RetryPolicy,
+    capture_library_diagnostics,
     classify_exception,
 )
 from tests.test_throttle import FakeClock
@@ -393,3 +394,58 @@ def test_a_second_factor_prompt_is_found_through_an_inner_exception_class() -> N
 def test_a_plain_auth_failure_is_still_not_an_mfa_prompt() -> None:
     exc = type("GarminConnectAuthenticationError", (Exception,), {})("Invalid credentials")
     assert isinstance(classify_exception(exc), GarminAuthError)
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics captured from the library's own log
+# ---------------------------------------------------------------------------
+
+
+def test_a_rate_limit_is_read_from_the_library_log_when_the_exception_hides_it() -> None:
+    """The case that produced two wrong diagnoses in production.
+
+    garminconnect logs the 429 it received from each transport and then raises
+    something generic. Without reading the log, the classifier concludes the
+    password was wrong.
+    """
+    exc = type("GarminConnectAuthenticationError", (Exception,), {})("login failed")
+    diagnostics = [
+        "mobile+cffi returned 429: Mobile login returned 429 — IP rate limited by Garmin",
+        "mobile+requests returned 429: Mobile login returned 429 — IP rate limited by Garmin",
+    ]
+    error = classify_exception(exc, diagnostics=diagnostics)
+
+    assert isinstance(error, GarminRateLimitedError)
+    assert error.connection_status is ConnectionStatus.RATE_LIMITED
+
+
+def test_an_mfa_prompt_is_read_from_the_library_log() -> None:
+    exc = type("GarminConnectAuthenticationError", (Exception,), {})("login failed")
+    error = classify_exception(exc, diagnostics=["MFA required for this account"])
+    assert isinstance(error, GarminMfaRequiredError)
+
+
+def test_diagnostics_do_not_override_a_real_status_code() -> None:
+    """A 401 is authoritative; a stale log line must not reinterpret it."""
+    error = classify_exception(FakeHttpError(401), diagnostics=["429 seen earlier"])
+    assert isinstance(error, GarminAuthError)
+
+
+def test_classification_still_works_with_no_diagnostics() -> None:
+    exc = type("GarminConnectAuthenticationError", (Exception,), {})("Invalid credentials")
+    assert isinstance(classify_exception(exc, diagnostics=[]), GarminAuthError)
+    assert isinstance(classify_exception(exc), GarminAuthError)
+
+
+def test_the_capture_collects_library_messages_and_then_detaches() -> None:
+    """It must not leave a handler attached to a global logger."""
+    library_logger = logging.getLogger("garminconnect")
+    before = list(library_logger.handlers)
+
+    with capture_library_diagnostics() as messages:
+        library_logger.warning("mobile+cffi returned 429")
+        assert any("429" in m for m in messages)
+
+    library_logger.warning("this one is after the block")
+    assert not any("after the block" in m for m in messages)
+    assert library_logger.handlers == before
